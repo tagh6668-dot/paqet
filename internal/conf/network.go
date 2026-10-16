@@ -22,6 +22,7 @@ type Network struct {
 	TCP        TCP            `yaml:"tcp"`
 	Interface  *net.Interface `yaml:"-"`
 	Port       int            `yaml:"-"`
+	RawIP      bool           `yaml:"-"` // true when link type is DLT_RAW (mobile data / no Ethernet header)
 }
 
 func (n *Network) setDefaults(role string) {
@@ -87,15 +88,15 @@ func (n *Addr) validate() []error {
 	}
 	n.Addr = l
 
-	if n.RouterMac_ == "" {
-		errors = append(errors, fmt.Errorf("router MAC address is required"))
+	// router_mac is optional: when empty (e.g. mobile data / Raw IP interfaces),
+	// skip MAC validation and leave Router as nil.
+	if n.RouterMac_ != "" {
+		hwAddr, err := net.ParseMAC(n.RouterMac_)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("invalid Router MAC address '%s': %v", n.RouterMac_, err))
+		}
+		n.Router = hwAddr
 	}
-
-	hwAddr, err := net.ParseMAC(n.RouterMac_)
-	if err != nil {
-		errors = append(errors, fmt.Errorf("invalid Router MAC address '%s': %v", n.RouterMac_, err))
-	}
-	n.Router = hwAddr
 
 	return errors
 }

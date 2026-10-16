@@ -50,6 +50,7 @@ type SendHandle struct {
 	tsCounter   atomic.Uint32
 	tcpF        tcpF
 	ePool       sync.Pool
+	rawIP       bool // true when link type is DLT_RAW (no Ethernet header)
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
@@ -72,6 +73,7 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	sh := &SendHandle{
 		handle:  handle,
 		srcPort: uint16(cfg.Port),
+		rawIP:   cfg.RawIP,
 		tcpF:    tcpF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
 		time:    uint32(time.Now().UnixNano() / int64(time.Millisecond)),
 		ePool: sync.Pool{
@@ -179,19 +181,31 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 		h.buildIPv4Header(e, dstIP)
 		ipLayer = &e.ip4
 		e.tcp.SetNetworkLayerForChecksum(&e.ip4)
-		e.eth.DstMAC = h.srcIPv4RHWA
-		e.eth.EthernetType = layers.EthernetTypeIPv4
+		if !h.rawIP {
+			e.eth.DstMAC = h.srcIPv4RHWA
+			e.eth.EthernetType = layers.EthernetTypeIPv4
+		}
 	} else {
 		h.buildIPv6Header(e, dstIP)
 		ipLayer = &e.ip6
 		e.tcp.SetNetworkLayerForChecksum(&e.ip6)
-		e.eth.DstMAC = h.srcIPv6RHWA
-		e.eth.EthernetType = layers.EthernetTypeIPv6
+		if !h.rawIP {
+			e.eth.DstMAC = h.srcIPv6RHWA
+			e.eth.EthernetType = layers.EthernetTypeIPv6
+		}
 	}
 
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
-	if err := gopacket.SerializeLayers(e.buf, opts, &e.eth, ipLayer, &e.tcp, gopacket.Payload(payload)); err != nil {
-		return err
+
+	// Raw IP mode (mobile data): skip Ethernet header, inject raw IP packet
+	if h.rawIP {
+		if err := gopacket.SerializeLayers(e.buf, opts, ipLayer, &e.tcp, gopacket.Payload(payload)); err != nil {
+			return err
+		}
+	} else {
+		if err := gopacket.SerializeLayers(e.buf, opts, &e.eth, ipLayer, &e.tcp, gopacket.Payload(payload)); err != nil {
+			return err
+		}
 	}
 
 	// pcap_sendpacket is not guaranteed thread-safe.

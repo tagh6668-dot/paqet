@@ -16,7 +16,8 @@ import (
 )
 
 type decoder struct {
-	parser  *gopacket.DecodingLayerParser
+	parser  *gopacket.DecodingLayerParser // v4-first (Ethernet mode, or RawIP v4 packets)
+	parser6 *gopacket.DecodingLayerParser // v6-first, used only in RawIP mode
 	eth     layers.Ethernet
 	ip4     layers.IPv4
 	ip6     layers.IPv6
@@ -49,11 +50,26 @@ func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
 	}
 
 	h := &RecvHandle{handle: handle}
-	h.dPool.New = func() any {
-		d := &decoder{decoded: make([]gopacket.LayerType, 0, 4)}
-		d.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &d.eth, &d.ip4, &d.ip6, &d.tcp)
-		d.parser.IgnoreUnsupported = true
-		return d
+
+	// Raw IP mode (mobile data: rmnet, ccmni): packets start directly with
+	// the IP header. The first nibble tells v4 vs v6, so keep one parser
+	// per family and pick the right one in Read.
+	if cfg.RawIP {
+		h.dPool.New = func() any {
+			d := &decoder{decoded: make([]gopacket.LayerType, 0, 4)}
+			d.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeIPv4, &d.ip4, &d.ip6, &d.tcp)
+			d.parser.IgnoreUnsupported = true
+			d.parser6 = gopacket.NewDecodingLayerParser(layers.LayerTypeIPv6, &d.ip6, &d.ip4, &d.tcp)
+			d.parser6.IgnoreUnsupported = true
+			return d
+		}
+	} else {
+		h.dPool.New = func() any {
+			d := &decoder{decoded: make([]gopacket.LayerType, 0, 4)}
+			d.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &d.eth, &d.ip4, &d.ip6, &d.tcp)
+			d.parser.IgnoreUnsupported = true
+			return d
+		}
 	}
 
 	return h, nil
@@ -71,7 +87,14 @@ func (h *RecvHandle) Read(data []byte) (int, net.Addr, error) {
 	d := h.dPool.Get().(*decoder)
 	defer h.dPool.Put(d)
 
-	if err := d.parser.DecodeLayers(zdata, &d.decoded); err != nil {
+	// Pick the parser by IP version nibble (Raw IP only; Ethernet mode
+	// always uses the single Ethernet-first parser).
+	p := d.parser
+	if d.parser6 != nil && len(zdata) > 0 && zdata[0]>>4 == 6 {
+		p = d.parser6
+	}
+	d.decoded = d.decoded[:0]
+	if err := p.DecodeLayers(zdata, &d.decoded); err != nil {
 		return 0, nil, errNoPayload
 	}
 

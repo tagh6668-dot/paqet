@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
 
 	"paqet/internal/conf"
@@ -44,6 +45,16 @@ func newHandle(cfg *conf.Network, sockbuf int, snapLen int, timeout time.Duratio
 	handle, err := inactive.Activate()
 	if err != nil {
 		return nil, fmt.Errorf("failed to activate pcap handle on %s: %v", cfg.Interface.Name, err)
+	}
+
+	// Detect Raw IP interfaces (mobile data: rmnet, ccmni, etc.).
+	// DLT_RAW is 12 in classic BSD numbering and 101 in the modern
+	// tcpdump LINKTYPE registry; DLT_IPV4/DLT_IPV6 (228/229) are
+	// v4-only/v6-only raw captures. All carry raw IP with no Ethernet header.
+	lt := handle.LinkType()
+	switch lt {
+	case 12, layers.LinkTypeRaw, layers.LinkTypeIPv4, layers.LinkTypeIPv6:
+		cfg.RawIP = true
 	}
 
 	return handle, nil
