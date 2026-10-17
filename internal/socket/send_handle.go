@@ -262,7 +262,10 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 				return fmt.Errorf("no raw socket for IPv6 (cooked mode)")
 			}
 			var dst unix.SockaddrInet6
-			dst.Port = int(dstPort)
+			// For AF_INET6+SOCK_RAW+IPPROTO_RAW+IPV6_HDRINCL the kernel
+			// expects sin6_port=0 (port is inside the TCP header). Non-zero
+			// triggers EINVAL on 4.19 (unlike AF_INET raw where any port works).
+			dst.Port = 0
 			copy(dst.Addr[:], dstIP.To16())
 			if err := unix.Sendto(h.rawFd6, rawBytes, 0, &dst); err != nil {
 				return err
