@@ -12,6 +12,7 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
+	"golang.org/x/sys/unix"
 
 	"paqet/internal/conf"
 	"paqet/internal/pkg/hash"
@@ -51,6 +52,11 @@ type SendHandle struct {
 	tcpF        tcpF
 	ePool       sync.Pool
 	rawIP       bool // true when link type is DLT_RAW (no Ethernet header)
+	isCooked    bool
+	// AF_PACKET / raw socket for cooked interfaces (ccmni/rmnet, LinkType SLL/SLL2)
+	rawFd4 int
+	rawFd6 int
+	ifName string
 }
 
 func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
@@ -74,6 +80,10 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		handle:  handle,
 		srcPort: uint16(cfg.Port),
 		rawIP:   cfg.RawIP,
+		isCooked: cfg.IsCooked,
+		rawFd4:  -1,
+		rawFd6:  -1,
+		ifName:  cfg.Interface.Name,
 		tcpF:    tcpF{tcpF: iterator.Iterator[conf.TCPF]{Items: cfg.TCP.LF}, clientTCPF: make(map[uint64]*iterator.Iterator[conf.TCPF])},
 		time:    uint32(time.Now().UnixNano() / int64(time.Millisecond)),
 		ePool: sync.Pool{
@@ -94,6 +104,28 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	if cfg.IPv6.Addr != nil {
 		sh.srcIPv6 = cfg.IPv6.Addr.IP
 		sh.srcIPv6RHWA = cfg.IPv6.Router
+	}
+	// For cooked interfaces (Linux SLL/SLL2 on ccmni/rmnet), pcap cannot send
+	// (pcap_sendpacket fails with "Sending packets isn't supported in cooked mode").
+	// Open AF_INET raw sockets bound to the interface; Write() will use them.
+	if cfg.IsCooked {
+		if sh.srcIPv4 != nil {
+			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
+			if err == nil {
+				_ = unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1)
+				_ = unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name)
+				sh.rawFd4 = fd
+			}
+		}
+		if sh.srcIPv6 != nil {
+			fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_RAW)
+			if err == nil {
+				// IPV6_HDRINCL on Linux: level IPPROTO_IPV6, opt IPV6_HDRINCL (51)
+				_ = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, 51, 1)
+				_ = unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name)
+				sh.rawFd6 = fd
+			}
+		}
 	}
 	return sh, nil
 }
@@ -177,7 +209,8 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 	h.buildTCPHeader(e, dstPort, h.getClientTCPF(dstIP, dstPort))
 
 	var ipLayer gopacket.SerializableLayer
-	if dstIP.To4() != nil {
+	isV4 := dstIP.To4() != nil
+	if isV4 {
 		h.buildIPv4Header(e, dstIP)
 		ipLayer = &e.ip4
 		e.tcp.SetNetworkLayerForChecksum(&e.ip4)
@@ -197,7 +230,7 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 
-	// Raw IP mode (mobile data): skip Ethernet header, inject raw IP packet
+	// Raw IP / cooked mode (mobile data): skip Ethernet header, inject raw IP packet
 	if h.rawIP {
 		if err := gopacket.SerializeLayers(e.buf, opts, ipLayer, &e.tcp, gopacket.Payload(payload)); err != nil {
 			return err
@@ -208,9 +241,38 @@ func (h *SendHandle) Write(payload []byte, addr *net.UDPAddr) error {
 		}
 	}
 
-	// pcap_sendpacket is not guaranteed thread-safe.
+	rawBytes := e.buf.Bytes()
+	// Cooked mode: send via AF_INET raw socket (pcap cannot send on SLL)
+	if h.isCooked {
+		if isV4 {
+			if h.rawFd4 < 0 {
+				return fmt.Errorf("no raw socket for IPv4 (cooked mode)")
+			}
+			var dst unix.SockaddrInet4
+			dst.Port = int(dstPort)
+			copy(dst.Addr[:], dstIP.To4())
+			// raw socket with IP_HDRINCL: kernel sends exactly our IP header + payload
+			if err := unix.Sendto(h.rawFd4, rawBytes, 0, &dst); err != nil {
+				return err
+			}
+			return nil
+		} else {
+			if h.rawFd6 < 0 {
+				return fmt.Errorf("no raw socket for IPv6 (cooked mode)")
+			}
+			var dst unix.SockaddrInet6
+			dst.Port = int(dstPort)
+			copy(dst.Addr[:], dstIP.To16())
+			if err := unix.Sendto(h.rawFd6, rawBytes, 0, &dst); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+
+	// Normal Ethernet mode: inject via pcap
 	h.writeMu.Lock()
-	err := h.handle.WritePacketData(e.buf.Bytes())
+	err := h.handle.WritePacketData(rawBytes)
 	h.writeMu.Unlock()
 	return err
 }
@@ -245,6 +307,12 @@ func (h *SendHandle) deleteClientTCPF(addr net.Addr) {
 }
 
 func (h *SendHandle) Close() {
+	if h.rawFd4 >= 0 {
+		unix.Close(h.rawFd4)
+	}
+	if h.rawFd6 >= 0 {
+		unix.Close(h.rawFd6)
+	}
 	if h.handle != nil {
 		h.handle.Close()
 	}

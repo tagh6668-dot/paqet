@@ -47,14 +47,18 @@ func newHandle(cfg *conf.Network, sockbuf int, snapLen int, timeout time.Duratio
 		return nil, fmt.Errorf("failed to activate pcap handle on %s: %v", cfg.Interface.Name, err)
 	}
 
-	// Detect Raw IP interfaces (mobile data: rmnet, ccmni, etc.).
-	// DLT_RAW is 12 in classic BSD numbering and 101 in the modern
-	// tcpdump LINKTYPE registry; DLT_IPV4/DLT_IPV6 (228/229) are
-	// v4-only/v6-only raw captures. All carry raw IP with no Ethernet header.
 	lt := handle.LinkType()
+	cfg.LinkType = lt
+	// Classify link type for send/recv handling:
+	// - DLT_RAW (12/101) / DLT_IPV4(228)/DLT_IPV6(229): raw IP, no L2 header at all
+	// - Linux SLL (113) / SLL2 (276): cooked mode — pcap can capture but cannot send via WritePacketData
 	switch lt {
 	case 12, layers.LinkTypeRaw, layers.LinkTypeIPv4, layers.LinkTypeIPv6:
 		cfg.RawIP = true
+		cfg.IsCooked = false
+	case layers.LinkTypeLinuxSLL, layers.LinkTypeLinuxSLL2:
+		cfg.RawIP = true
+		cfg.IsCooked = true
 	}
 
 	return handle, nil

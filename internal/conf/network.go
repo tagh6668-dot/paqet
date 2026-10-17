@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+
+	"github.com/gopacket/gopacket/layers"
 )
 
 type Addr struct {
@@ -23,6 +25,8 @@ type Network struct {
 	Interface  *net.Interface `yaml:"-"`
 	Port       int            `yaml:"-"`
 	RawIP      bool           `yaml:"-"` // true when link type is DLT_RAW (mobile data / no Ethernet header)
+	IsCooked   bool           `yaml:"-"` // true when link type is Linux SLL/SLL2 (cooked mode, needs AF_PACKET for send)
+	LinkType   layers.LinkType `yaml:"-"` // actual pcap link type
 }
 
 func (n *Network) setDefaults(role string) {
