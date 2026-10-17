@@ -26,10 +26,11 @@ type decoder struct {
 }
 
 type RecvHandle struct {
-	handle   *pcap.Handle
-	dPool    sync.Pool
-	mu       sync.Mutex
-	isCooked bool
+	handle       *pcap.Handle
+	dPool        sync.Pool
+	mu           sync.Mutex
+	isCooked     bool
+	cookedHdrLen int
 }
 
 func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
@@ -50,7 +51,15 @@ func NewRecvHandle(cfg *conf.Network) (*RecvHandle, error) {
 		return nil, fmt.Errorf("failed to set BPF filter: %w", err)
 	}
 
-	h := &RecvHandle{handle: handle, isCooked: cfg.IsCooked}
+	cookedLen := 0
+	if cfg.IsCooked {
+		if cfg.LinkType == layers.LinkTypeLinuxSLL2 {
+			cookedLen = 20
+		} else {
+			cookedLen = 16
+		}
+	}
+	h := &RecvHandle{handle: handle, isCooked: cfg.IsCooked, cookedHdrLen: cookedLen}
 
 	// Raw IP / cooked mode (mobile data: rmnet/ccmni): packets start directly with
 	// the IP header (or SLL header for cooked). For cooked, strip 16-byte SLL first.
@@ -84,9 +93,9 @@ func (h *RecvHandle) Read(data []byte) (int, net.Addr, error) {
 		return 0, nil, err
 	}
 
-	// Cooked (SLL/SLL2) capture includes 16-byte SLL header before IP. Strip it.
-	if h.isCooked && len(zdata) >= 16 {
-		zdata = zdata[16:]
+	// Cooked capture includes SLL (16) or SLL2 (20) header before IP. Strip it.
+	if h.isCooked && len(zdata) >= h.cookedHdrLen && h.cookedHdrLen > 0 {
+		zdata = zdata[h.cookedHdrLen:]
 	}
 
 	d := h.dPool.Get().(*decoder)
