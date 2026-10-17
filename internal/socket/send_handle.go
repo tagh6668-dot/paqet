@@ -120,8 +120,9 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 		if sh.srcIPv6 != nil {
 			fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_RAW)
 			if err == nil {
-				// IPV6_HDRINCL on Linux: level IPPROTO_IPV6, opt IPV6_HDRINCL (51)
-				_ = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, 51, 1)
+				// IPV6_HDRINCL = 36 on Linux (not 51 which is IPV6_RECVHOPLIMIT).
+				// Use constant if available, otherwise 36.
+				_ = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_HDRINCL, 1)
 				_ = unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name)
 				sh.rawFd6 = fd
 			}
