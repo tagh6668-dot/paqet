@@ -6,8 +6,8 @@ import (
 )
 
 func IPAddr(ip net.IP, port uint16) uint64 {
-	if len(ip) == 4 {
-		hash := uint64(binary.BigEndian.Uint32(ip))<<16 | uint64(port)
+	if ip4 := ip.To4(); ip4 != nil {
+		hash := uint64(binary.BigEndian.Uint32(ip4))<<16 | uint64(port)
 		return hash
 	}
 	ip16 := ip.To16()
