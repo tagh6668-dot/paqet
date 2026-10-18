@@ -111,21 +111,34 @@ func NewSendHandle(cfg *conf.Network) (*SendHandle, error) {
 	if cfg.IsCooked {
 		if sh.srcIPv4 != nil {
 			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
-			if err == nil {
-				_ = unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1)
-				_ = unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name)
-				sh.rawFd4 = fd
+			if err != nil {
+				return nil, fmt.Errorf("cooked IPv4 raw socket socket(AF_INET): %w (need root + CAP_NET_RAW)", err)
 			}
+			if err := unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_HDRINCL, 1); err != nil {
+				unix.Close(fd)
+				return nil, fmt.Errorf("cooked IPv4 setsockopt IP_HDRINCL on %s: %w", cfg.Interface.Name, err)
+			}
+			if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name); err != nil {
+				unix.Close(fd)
+				return nil, fmt.Errorf("cooked IPv4 setsockopt SO_BINDTODEVICE=%s: %w (iface down or CAP_NET_RAW denied)", cfg.Interface.Name, err)
+			}
+			sh.rawFd4 = fd
 		}
 		if sh.srcIPv6 != nil {
 			fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_RAW)
-			if err == nil {
-				// IPV6_HDRINCL = 36 on Linux (not 51 which is IPV6_RECVHOPLIMIT).
-				// Use constant if available, otherwise 36.
-				_ = unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_HDRINCL, 1)
-				_ = unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name)
-				sh.rawFd6 = fd
+			if err != nil {
+				return nil, fmt.Errorf("cooked IPv6 raw socket socket(AF_INET6): %w (need root + CAP_NET_RAW)", err)
 			}
+			// IPV6_HDRINCL = 36 on Linux (not 51 which is IPV6_RECVHOPLIMIT).
+			if err := unix.SetsockoptInt(fd, unix.IPPROTO_IPV6, unix.IPV6_HDRINCL, 1); err != nil {
+				unix.Close(fd)
+				return nil, fmt.Errorf("cooked IPv6 setsockopt IPV6_HDRINCL on %s: %w", cfg.Interface.Name, err)
+			}
+			if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, cfg.Interface.Name); err != nil {
+				unix.Close(fd)
+				return nil, fmt.Errorf("cooked IPv6 setsockopt SO_BINDTODEVICE=%s: %w (iface down or CAP_NET_RAW denied)", cfg.Interface.Name, err)
+			}
+			sh.rawFd6 = fd
 		}
 	}
 	return sh, nil
